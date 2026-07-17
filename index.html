@@ -1110,12 +1110,77 @@ function createLoansPage(filterStatus){
     el.querySelectorAll('[data-action="kembalikan"]').forEach(btn => btn.onclick = () => {
       const loan = LoansEngine.getById(btn.dataset.id);
       if(!loan) return;
-      if(!confirm('Tandai buku ini sudah dikembalikan?')) return;
-      LoansEngine.update(loan.id, { status:'dikembalikan', tanggalDikembalikan: new Date().toISOString().slice(0,10) });
-      const book = BooksEngine.getById(loan.bookId);
-      if(book) BooksEngine.update(book.id, { stok: book.stok + 1 });
-      Toast.success('Buku ditandai sudah dikembalikan');
+      
+      // Menggunakan custom Modal sebagai ganti confirm browser bawaan
+      Modal.open({
+        title: 'Konfirmasi Pengembalian',
+        bodyHtml: `<p class="text-[13px] text-white/85">Apakah Anda yakin ingin menandai buku ini sudah dikembalikan?</p>`,
+        footerHtml: `
+          <div class="flex gap-3">
+            <button id="confirm-ret-cancel" class="flex-1 rounded-xl py-2.5 text-[13px] font-medium glass-strong hover:bg-white/10 transition">Batal</button>
+            <button id="confirm-ret-ok" class="flex-1 rounded-xl py-2.5 text-[13px] font-semibold grad-violet-blue hover:opacity-90 transition">Ya, Kembalikan</button>
+          </div>
+        `,
+        onMount: () => {
+          document.getElementById('confirm-ret-cancel').onclick = Modal.close;
+          document.getElementById('confirm-ret-ok').onclick = () => {
+            LoansEngine.update(loan.id, { status:'dikembalikan', tanggalDikembalikan: new Date().toISOString().slice(0,10) });
+            const book = BooksEngine.getById(loan.bookId);
+            if(book) BooksEngine.update(book.id, { stok: book.stok + 1 });
+            
+            // Cek antrean reservasi aktif menggunakan metode FIFO
+            const reservations = ReservasiEngine.getAll()
+              .filter(r => r.bookId === loan.bookId && r.status === 'Menunggu')
+              .sort((a, b) => {
+                const dateA = new Date(a.tanggalReservasi || 0);
+                const dateB = new Date(b.tanggalReservasi || 0);
+                if (dateA.getTime() !== dateB.getTime()) {
+                  return dateA.getTime() - dateB.getTime();
+                }
+                return (a.createdAt || 0) - (b.createdAt || 0);
+              });
+
+            if (reservations.length > 0) {
+              const earliestRes = reservations[0];
+              // Tampilkan dialog prioritas FIFO untuk petugas
+              Modal.open({
+                title: 'Notifikasi Prioritas Reservasi (FIFO)',
+                bodyHtml: `
+                  <div class="flex flex-col gap-4 text-[13px] text-white/80">
+                    <div class="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl flex flex-col gap-2">
+                      <p class="font-semibold text-amber-400">Peringatan Reservasi Aktif!</p>
+                      <p>Buku <b class="text-white">"${Utils.escapeHtml(earliestRes.judulBuku)}"</b> yang baru dikembalikan memiliki antrean reservasi aktif.</p>
+                    </div>
+                    <div>
+                      <p class="mb-1 text-white/50 text-[11px]">Reservasi Paling Awal:</p>
+                      <div class="glass p-3 rounded-lg flex flex-col gap-1">
+                        <p><b>Nama Anggota:</b> ${Utils.escapeHtml(earliestRes.namaAnggota)}</p>
+                        <p><b>ID Anggota:</b> ${Utils.escapeHtml(earliestRes.memberId)}</p>
+                        <p><b>Tanggal Antrean:</b> ${Utils.escapeHtml(earliestRes.tanggalReservasi)}</p>
+                      </div>
+                    </div>
+                    <p class="text-white/60">Harap utamakan dan amankan buku ini untuk diserahkan kepada anggota di atas terlebih dahulu.</p>
+                  </div>
+                `,
+                footerHtml: `
+                  <div class="flex gap-3">
+                    <button id="res-notif-close" class="flex-1 rounded-xl py-2.5 text-[13px] font-semibold grad-violet-blue hover:opacity-90 transition">Saya Mengerti</button>
+                  </div>
+                `,
+                onMount: () => {
+                  document.getElementById('res-notif-close').onclick = Modal.close;
+                }
+              });
+              Toast.success('Buku dikembalikan & ada reservasi aktif!');
+            } else {
+              Toast.success('Buku berhasil dikembalikan');
+              Modal.close();
+            }
+          };
+        }
+      });
     });
+
     el.querySelectorAll('.table-page-btn').forEach(btn => btn.onclick = () => {
       if(btn.disabled) return;
       state.page = parseInt(btn.dataset.page, 10);
@@ -1124,9 +1189,9 @@ function createLoansPage(filterStatus){
   }
 
   function openForm(){
-    const books = BooksEngine.getAll().filter(b => b.stok > 0);
+    const books = BooksEngine.getAll(); // Menampilkan semua buku tanpa filter stok
     const members = MembersEngine.getAll().filter(m => m.status === 'aktif');
-    if(books.length === 0){ Toast.warning('Tidak ada buku dengan stok tersedia'); return; }
+    if(books.length === 0){ Toast.warning('Belum ada buku terdaftar'); return; }
     if(members.length === 0){ Toast.warning('Belum ada anggota aktif terdaftar'); return; }
 
     const today = new Date().toISOString().slice(0,10);
@@ -1137,7 +1202,12 @@ function createLoansPage(filterStatus){
         <form id="loan-form" class="flex flex-col gap-4" onsubmit="event.preventDefault()">
           <div><label class="text-[11.5px] text-white/55 mb-1 block">Buku *</label>
             <select id="f-book" class="w-full rounded-lg px-3 py-2.5 text-[13px]">
-              ${books.map(b => `<option value="${b.id}">${Utils.escapeHtml(b.judul)} (stok: ${b.stok})</option>`).join('')}
+              ${books.map(b => {
+                const label = b.stok > 0 
+                  ? `${Utils.escapeHtml(b.judul)} (stok: ${b.stok})` 
+                  : `${Utils.escapeHtml(b.judul)} (Stok habis - dapat direservasi)`;
+                return `<option value="${b.id}">${label}</option>`;
+              }).join('')}
             </select></div>
           <div><label class="text-[11.5px] text-white/55 mb-1 block">Anggota *</label>
             <select id="f-member" class="w-full rounded-lg px-3 py-2.5 text-[13px]">
@@ -1162,6 +1232,41 @@ function createLoansPage(filterStatus){
 
           const bookId = document.getElementById('f-book').value;
           const memberId = document.getElementById('f-member').value;
+          const selectedBook = BooksEngine.getById(bookId);
+
+          // Cek jika stok kosong, tawarkan jalur reservasi
+          if (selectedBook && selectedBook.stok === 0) {
+            Modal.open({
+              title: 'Konfirmasi Reservasi',
+              bodyHtml: `<p class="text-[13px] text-white/85">Stok buku habis. Simpan sebagai reservasi?</p>`,
+              footerHtml: `
+                <div class="flex gap-3">
+                  <button id="res-cancel" class="flex-1 rounded-xl py-2.5 text-[13px] font-medium glass-strong hover:bg-white/10 transition">Batal</button>
+                  <button id="res-confirm" class="flex-1 rounded-xl py-2.5 text-[13px] font-semibold grad-pink-purple hover:opacity-90 transition">Ya, Simpan</button>
+                </div>
+              `,
+              onMount: () => {
+                document.getElementById('res-cancel').onclick = Modal.close;
+                document.getElementById('res-confirm').onclick = () => {
+                  const member = MembersEngine.getById(memberId);
+                  ReservasiEngine.create({
+                  memberId: memberId,
+                  namaAnggota: member ? member.nama : '(anggota dihapus)',
+                  bookId: bookId,
+                  judulBuku: selectedBook.judul,
+                  tanggalReservasi: today,
+                  status: 'Menunggu',
+                  createdAt: Date.now()
+                  });
+                  Toast.success('Reservasi berhasil disimpan');
+                  Modal.close();
+                };
+              }
+            });
+            return;
+          }
+
+          // Proses peminjaman normal jika stok > 0
           LoansEngine.create({
             bookId, memberId,
             tanggalPinjam: today,
@@ -1181,6 +1286,7 @@ function createLoansPage(filterStatus){
 
   return { render, mount };
 }
+
 const PeminjamanPage = createLoansPage('dipinjam');
 const PengembalianPage = createLoansPage('dikembalikan');
 
