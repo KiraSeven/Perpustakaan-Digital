@@ -341,7 +341,7 @@ const ICON_FILES = {
   fileText: 'document', barChart: 'bar-chart', settings: 'settings', search: 'search',
   bell: 'bell', x: 'multiply', check: 'checkmark', alertTriangle: 'error', info: 'info',
   inbox: 'inbox', clock: 'clock', package: 'package', checkCircle: 'checkmark',
-  download: 'download', sparkles: 'sparkling', logout: 'logout-rounded-left',
+  download: 'download', sparkles: 'sparkling', logout: 'logout-rounded-left', trash: 'trash',
 };
 // Small UI controls stay flat SVG — 3D glossy icons blur out at this size
 const ICON_PATHS_FLAT = {
@@ -478,9 +478,9 @@ function createCrudEngine(storeKey){
         .catch(err => { console.error(err); Toast.error(`Gagal memperbarui data`); });
     },
     remove(id){
-      if(LicenseGate.blockIfReadOnly()) return;
+      if(LicenseGate.blockIfReadOnly()) return Promise.resolve();
       attachListener();
-      window.dbRemove(nodeRef(id))
+      return window.dbRemove(nodeRef(id))
         .catch(err => { console.error(err); Toast.error(`Gagal menghapus data`); });
     },
     subscribe(fn){
@@ -1064,7 +1064,9 @@ function createLoansPage(filterStatus){
           <h1 class="font-display font-bold text-2xl text-grad">${isPengembalian ? 'Pengembalian' : 'Peminjaman'}</h1>
           <p class="text-[12.5px] text-white/50 mt-1">${isPengembalian ? 'Riwayat buku yang sudah dikembalikan.' : 'Catat peminjaman buku ke anggota.'}</p>
         </div>
-        ${isPengembalian ? '' : `<button id="btn-add-loan" class="grad-pink-purple text-[13px] font-semibold px-4 py-2.5 rounded-xl flex items-center gap-2 hover:opacity-90 transition shadow-lg"><span>+</span> Catat peminjaman</button>`}
+        ${isPengembalian
+          ? `<button id="btn-clear-history" class="glass-strong text-[13px] font-semibold px-4 py-2.5 rounded-xl flex items-center gap-2 hover:bg-white/10 transition">${Icon('trash',15)} Bersihkan Riwayat</button>`
+          : `<button id="btn-add-loan" class="grad-pink-purple text-[13px] font-semibold px-4 py-2.5 rounded-xl flex items-center gap-2 hover:opacity-90 transition shadow-lg"><span>+</span> Catat peminjaman</button>`}
       </div>
       <div class="glass rounded-2xl overflow-hidden" id="loans-table"></div>
     </div>`;
@@ -1072,10 +1074,100 @@ function createLoansPage(filterStatus){
 
   function mount(){
     if(!isPengembalian) document.getElementById('btn-add-loan').onclick = () => openForm();
+    if(isPengembalian) document.getElementById('btn-clear-history').onclick = () => openClearHistoryModal();
     renderTable();
     LoansEngine.subscribe(renderTable);
     BooksEngine.subscribe(renderTable);
     MembersEngine.subscribe(renderTable);
+  }
+
+  // Returns 'dikembalikan' records older than `days` (by createdAt, not the
+  // date string) — Infinity means "all returned records, regardless of age".
+  function getRecordsOlderThan(days){
+    const returned = LoansEngine.getAll().filter(l => l.status === 'dikembalikan');
+    if(days === Infinity) return returned;
+    const cutoffAge = days * 86400000;
+    const now = Date.now();
+    return returned.filter(l => (now - (l.createdAt || 0)) > cutoffAge);
+  }
+
+  // Deletes matching 'dikembalikan' records one by one via LoansEngine.remove
+  // (same engine/Firebase path Pengembalian already uses — no schema change).
+  // Table/pagination/dashboard all update on their own through the existing
+  // LoansEngine.subscribe() wiring; nothing extra to refresh manually here.
+  async function clearHistory(days){
+    const targets = getRecordsOlderThan(days);
+    if(targets.length === 0){
+      Toast.info('Tidak ada data yang dapat dihapus.');
+      Modal.close();
+      return;
+    }
+
+    const optionsEl = document.getElementById('clear-history-options');
+    const progressEl = document.getElementById('clear-history-progress');
+    const progressText = document.getElementById('clear-history-progress-text');
+    if(optionsEl) optionsEl.classList.add('hidden');
+    if(progressEl){ progressEl.classList.remove('hidden'); progressEl.classList.add('flex'); }
+
+    const total = targets.length;
+    let done = 0;
+    if(progressText) progressText.textContent = `${done} / ${total} data`;
+
+    for(const record of targets){
+      try {
+        await LoansEngine.remove(record.id);
+      } catch(err){
+        console.error('Gagal menghapus riwayat pengembalian:', record.id, err);
+      }
+      done++;
+      if(progressText) progressText.textContent = `${done} / ${total} data`;
+    }
+
+    Modal.close();
+    Toast.success(`${total} riwayat berhasil dihapus.`);
+  }
+
+  function openClearHistoryModal(){
+    const count30 = getRecordsOlderThan(30).length;
+    const count180 = getRecordsOlderThan(180).length;
+    const countAll = getRecordsOlderThan(Infinity).length;
+
+    Modal.open({
+      title: 'Bersihkan Riwayat Pengembalian',
+      bodyHtml: `
+        <p class="text-[12.5px] text-white/55 mb-5">Riwayat yang dihapus tidak dapat dikembalikan.</p>
+        <div id="clear-history-options" class="flex flex-col gap-2.5">
+          <button data-days="30" class="clear-history-option flex items-center justify-between glass-strong hover:bg-white/10 transition rounded-xl px-4 py-3 text-left">
+            <span class="text-[13px] font-medium">Hapus Riwayat &gt; 30 Hari</span>
+            <span class="text-[12px] text-white/50">Hapus ${count30} Data</span>
+          </button>
+          <button data-days="180" class="clear-history-option flex items-center justify-between glass-strong hover:bg-white/10 transition rounded-xl px-4 py-3 text-left">
+            <span class="text-[13px] font-medium">Hapus Riwayat &gt; 6 Bulan</span>
+            <span class="text-[12px] text-white/50">Hapus ${count180} Data</span>
+          </button>
+          <button data-days="Infinity" class="clear-history-option flex items-center justify-between glass-strong hover:bg-white/10 transition rounded-xl px-4 py-3 text-left" style="border:1px solid rgba(239,68,68,0.3);">
+            <span class="text-[13px] font-medium text-red-300">Hapus Semua Riwayat</span>
+            <span class="text-[12px] text-red-300/70">Hapus ${countAll} Data</span>
+          </button>
+        </div>
+        <div id="clear-history-progress" class="hidden flex-col items-center gap-3 py-6">
+          <div class="w-8 h-8 rounded-full animate-spin" style="border:3px solid rgba(255,255,255,0.15); border-top-color:#a78bfa;"></div>
+          <p class="text-[12.5px] text-white/60">Menghapus...</p>
+          <p id="clear-history-progress-text" class="text-[13px] font-semibold">0 / 0 data</p>
+        </div>
+      `,
+      footerHtml: `<button id="clear-history-cancel" class="w-full rounded-xl py-2.5 text-[13px] font-medium glass-strong hover:bg-white/10 transition">Batal</button>`,
+      onMount: () => {
+        document.getElementById('clear-history-cancel').onclick = Modal.close;
+        document.querySelectorAll('.clear-history-option').forEach(btn => {
+          btn.onclick = () => {
+            const raw = btn.dataset.days;
+            const days = raw === 'Infinity' ? Infinity : parseInt(raw, 10);
+            clearHistory(days);
+          };
+        });
+      }
+    });
   }
 
   function renderTable(){
@@ -1110,77 +1202,29 @@ function createLoansPage(filterStatus){
     el.querySelectorAll('[data-action="kembalikan"]').forEach(btn => btn.onclick = () => {
       const loan = LoansEngine.getById(btn.dataset.id);
       if(!loan) return;
-      
-      // Menggunakan custom Modal sebagai ganti confirm browser bawaan
-      Modal.open({
-        title: 'Konfirmasi Pengembalian',
-        bodyHtml: `<p class="text-[13px] text-white/85">Apakah Anda yakin ingin menandai buku ini sudah dikembalikan?</p>`,
-        footerHtml: `
-          <div class="flex gap-3">
-            <button id="confirm-ret-cancel" class="flex-1 rounded-xl py-2.5 text-[13px] font-medium glass-strong hover:bg-white/10 transition">Batal</button>
-            <button id="confirm-ret-ok" class="flex-1 rounded-xl py-2.5 text-[13px] font-semibold grad-violet-blue hover:opacity-90 transition">Ya, Kembalikan</button>
-          </div>
-        `,
-        onMount: () => {
-          document.getElementById('confirm-ret-cancel').onclick = Modal.close;
-          document.getElementById('confirm-ret-ok').onclick = () => {
-            LoansEngine.update(loan.id, { status:'dikembalikan', tanggalDikembalikan: new Date().toISOString().slice(0,10) });
-            const book = BooksEngine.getById(loan.bookId);
-            if(book) BooksEngine.update(book.id, { stok: book.stok + 1 });
-            
-            // Cek antrean reservasi aktif menggunakan metode FIFO
-            const reservations = ReservasiEngine.getAll()
-              .filter(r => r.bookId === loan.bookId && r.status === 'Menunggu')
-              .sort((a, b) => {
-                const dateA = new Date(a.tanggalReservasi || 0);
-                const dateB = new Date(b.tanggalReservasi || 0);
-                if (dateA.getTime() !== dateB.getTime()) {
-                  return dateA.getTime() - dateB.getTime();
-                }
-                return (a.createdAt || 0) - (b.createdAt || 0);
-              });
+      if(!confirm('Tandai buku ini sudah dikembalikan?')) return;
+      LoansEngine.update(loan.id, { status:'dikembalikan', tanggalDikembalikan: new Date().toISOString().slice(0,10) });
+      const book = BooksEngine.getById(loan.bookId);
+      if(book) BooksEngine.update(book.id, { stok: book.stok + 1 });
+      Toast.success('Buku ditandai sudah dikembalikan');
 
-            if (reservations.length > 0) {
-              const earliestRes = reservations[0];
-              // Tampilkan dialog prioritas FIFO untuk petugas
-              Modal.open({
-                title: 'Notifikasi Prioritas Reservasi (FIFO)',
-                bodyHtml: `
-                  <div class="flex flex-col gap-4 text-[13px] text-white/80">
-                    <div class="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl flex flex-col gap-2">
-                      <p class="font-semibold text-amber-400">Peringatan Reservasi Aktif!</p>
-                      <p>Buku <b class="text-white">"${Utils.escapeHtml(earliestRes.judulBuku)}"</b> yang baru dikembalikan memiliki antrean reservasi aktif.</p>
-                    </div>
-                    <div>
-                      <p class="mb-1 text-white/50 text-[11px]">Reservasi Paling Awal:</p>
-                      <div class="glass p-3 rounded-lg flex flex-col gap-1">
-                        <p><b>Nama Anggota:</b> ${Utils.escapeHtml(earliestRes.namaAnggota)}</p>
-                        <p><b>ID Anggota:</b> ${Utils.escapeHtml(earliestRes.memberId)}</p>
-                        <p><b>Tanggal Antrean:</b> ${Utils.escapeHtml(earliestRes.tanggalReservasi)}</p>
-                      </div>
-                    </div>
-                    <p class="text-white/60">Harap utamakan dan amankan buku ini untuk diserahkan kepada anggota di atas terlebih dahulu.</p>
-                  </div>
-                `,
-                footerHtml: `
-                  <div class="flex gap-3">
-                    <button id="res-notif-close" class="flex-1 rounded-xl py-2.5 text-[13px] font-semibold grad-violet-blue hover:opacity-90 transition">Saya Mengerti</button>
-                  </div>
-                `,
-                onMount: () => {
-                  document.getElementById('res-notif-close').onclick = Modal.close;
-                }
-              });
-              Toast.success('Buku dikembalikan & ada reservasi aktif!');
-            } else {
-              Toast.success('Buku berhasil dikembalikan');
-              Modal.close();
-            }
-          };
+      // Cek apakah ada reservasi menunggu untuk buku ini — kalau ada,
+      // beritahu petugas supaya diprioritaskan ke anggota yang reservasi
+      // paling awal (FIFO, diurutkan dari waktu reservasi dibuat).
+      if(book){
+        const pending = ReservasiEngine.getAll()
+          .filter(r => r.bookId === book.id && r.status === 'Menunggu')
+          .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+        if(pending.length > 0){
+          const earliest = pending[0];
+          Toast.show(
+            `📌 Ada ${pending.length} reservasi untuk "${book.judul}" — prioritaskan ${earliest.namaAnggota} (reservasi ${earliest.tanggalReservasi}, antrean pertama).`,
+            'warning',
+            7000
+          );
         }
-      });
+      }
     });
-
     el.querySelectorAll('.table-page-btn').forEach(btn => btn.onclick = () => {
       if(btn.disabled) return;
       state.page = parseInt(btn.dataset.page, 10);
@@ -1189,9 +1233,9 @@ function createLoansPage(filterStatus){
   }
 
   function openForm(){
-    const books = BooksEngine.getAll(); // Menampilkan semua buku tanpa filter stok
+    const books = BooksEngine.getAll();
     const members = MembersEngine.getAll().filter(m => m.status === 'aktif');
-    if(books.length === 0){ Toast.warning('Belum ada buku terdaftar'); return; }
+    if(books.length === 0){ Toast.warning('Belum ada buku terdaftar di koleksi'); return; }
     if(members.length === 0){ Toast.warning('Belum ada anggota aktif terdaftar'); return; }
 
     const today = new Date().toISOString().slice(0,10);
@@ -1202,12 +1246,7 @@ function createLoansPage(filterStatus){
         <form id="loan-form" class="flex flex-col gap-4" onsubmit="event.preventDefault()">
           <div><label class="text-[11.5px] text-white/55 mb-1 block">Buku *</label>
             <select id="f-book" class="w-full rounded-lg px-3 py-2.5 text-[13px]">
-              ${books.map(b => {
-                const label = b.stok > 0 
-                  ? `${Utils.escapeHtml(b.judul)} (stok: ${b.stok})` 
-                  : `${Utils.escapeHtml(b.judul)} (Stok habis - dapat direservasi)`;
-                return `<option value="${b.id}">${label}</option>`;
-              }).join('')}
+              ${books.map(b => `<option value="${b.id}">${Utils.escapeHtml(b.judul)} ${b.stok > 0 ? `(stok: ${b.stok})` : '— Stok habis (dapat direservasi)'}</option>`).join('')}
             </select></div>
           <div><label class="text-[11.5px] text-white/55 mb-1 block">Anggota *</label>
             <select id="f-member" class="w-full rounded-lg px-3 py-2.5 text-[13px]">
@@ -1232,49 +1271,34 @@ function createLoansPage(filterStatus){
 
           const bookId = document.getElementById('f-book').value;
           const memberId = document.getElementById('f-member').value;
-          const selectedBook = BooksEngine.getById(bookId);
+          const book = BooksEngine.getById(bookId);
+          const member = MembersEngine.getById(memberId);
+          if(!book || !member) return;
 
-          // Cek jika stok kosong, tawarkan jalur reservasi
-          if (selectedBook && selectedBook.stok === 0) {
-            Modal.open({
-              title: 'Konfirmasi Reservasi',
-              bodyHtml: `<p class="text-[13px] text-white/85">Stok buku habis. Simpan sebagai reservasi?</p>`,
-              footerHtml: `
-                <div class="flex gap-3">
-                  <button id="res-cancel" class="flex-1 rounded-xl py-2.5 text-[13px] font-medium glass-strong hover:bg-white/10 transition">Batal</button>
-                  <button id="res-confirm" class="flex-1 rounded-xl py-2.5 text-[13px] font-semibold grad-pink-purple hover:opacity-90 transition">Ya, Simpan</button>
-                </div>
-              `,
-              onMount: () => {
-                document.getElementById('res-cancel').onclick = Modal.close;
-                document.getElementById('res-confirm').onclick = () => {
-                  const member = MembersEngine.getById(memberId);
-                  ReservasiEngine.create({
-                  memberId: memberId,
-                  namaAnggota: member ? member.nama : '(anggota dihapus)',
-                  bookId: bookId,
-                  judulBuku: selectedBook.judul,
-                  tanggalReservasi: today,
-                  status: 'Menunggu',
-                  createdAt: Date.now()
-                  });
-                  Toast.success('Reservasi berhasil disimpan');
-                  Modal.close();
-                };
-              }
+          if(book.stok <= 0){
+            // Out of stock: offer a reservation instead of a loan — never create
+            // a loan record for a book with zero stock.
+            if(!confirm('Stok buku habis. Simpan sebagai reservasi?')) return;
+            ReservasiEngine.create({
+              namaAnggota: member.nama,
+              memberId: member.id,
+              bookId: book.id,
+              judulBuku: book.judul,
+              tanggalReservasi: today,
+              status: 'Menunggu'
             });
+            Toast.success('Reservasi berhasil disimpan — buku akan diprioritaskan saat tersedia');
+            Modal.close();
             return;
           }
 
-          // Proses peminjaman normal jika stok > 0
           LoansEngine.create({
             bookId, memberId,
             tanggalPinjam: today,
             jatuhTempo: dueVal,
             status: 'dipinjam'
           });
-          const book = BooksEngine.getById(bookId);
-          if(book) BooksEngine.update(book.id, { stok: Math.max(0, book.stok - 1) });
+          BooksEngine.update(book.id, { stok: Math.max(0, book.stok - 1) });
           Toast.success('Peminjaman berhasil dicatat');
           Modal.close();
         };
@@ -1286,7 +1310,6 @@ function createLoansPage(filterStatus){
 
   return { render, mount };
 }
-
 const PeminjamanPage = createLoansPage('dipinjam');
 const PengembalianPage = createLoansPage('dikembalikan');
 
